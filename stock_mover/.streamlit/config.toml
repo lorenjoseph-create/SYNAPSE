@@ -1,7 +1,12 @@
-# StockFlow AI theme, customized for Manyavar (palette from manyavar.com)
 [theme]
 base = "light"
-primaryColor = "#E04E1C"
-backgroundColor = "#FFFBF2"
-secondaryBackgroundColor = "#FFF3DD"
+primaryColor = "#2F5D62"
+backgroundColor = "#FAFAF8"
+secondaryBackgroundColor = "#EEF3F3"
 textColor = "#222222"
+
+[server]
+maxUploadSize = 400
+
+[browser]
+gatherUsageStats = false

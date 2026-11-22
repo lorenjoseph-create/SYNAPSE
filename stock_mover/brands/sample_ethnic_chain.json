@@ -1,0 +1,8 @@
+{
+  "brand": {"name": "Sample ethnic-wear chain (hackathon pack)", "currency": "₹", "number_style": "indian"},
+  "planning": {
+    "tier_order": ["S++", "S+", "A", "B"],
+    "category_groups": {"Accessories (Safa/Mala/Stole)": ["Safa", "Mala", "Stole"]}
+  },
+  "season": {"peak_label": "wedding date", "event_label": "festival week"}
+}

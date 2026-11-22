@@ -1,0 +1,5 @@
+{
+  "brand": {"name": "Demo Threads", "currency": "₹", "number_style": "indian", "primary_color": "#7A2E4A"},
+  "planning": {"tier_order": ["A", "B", "Outlet"]},
+  "season": {"peak_label": "wedding date", "event_label": "festival week"}
+}

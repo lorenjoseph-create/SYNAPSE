@@ -1,0 +1,12 @@
+from,to,lead_days,cost_per_unit,cost_per_trip
+WH-JAI,zone:North,2,30,700
+WH-JAI,zone:Central,4,55,1400
+WH-JAI,zone:West,5,70,1800
+WH-IND,zone:Central,2,30,700
+WH-IND,zone:West,3,45,1100
+WH-IND,zone:North,4,55,1400
+city:Jaipur,city:Jaipur,1,15,300
+city:Indore,city:Indore,1,15,300
+zone:North,zone:North,2,35,900
+zone:Central,zone:Central,2,35,900
+*,*,5,90,2500

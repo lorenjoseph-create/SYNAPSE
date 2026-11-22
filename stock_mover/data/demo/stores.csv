@@ -1,0 +1,10 @@
+store_id,city,region,zone,tier,capacity_units,opened_on,store_type,home_warehouse,manager_id
+JAI-01,Jaipur,Rajasthan,North,A,2100,2018-03-01,store,WH-JAI,AM-01
+JAI-02,Jaipur,Rajasthan,North,B,1200,2021-07-01,store,WH-JAI,AM-01
+UDR-01,Udaipur,Rajasthan,North,B,1140,2022-02-01,store,WH-JAI,AM-01
+IND-01,Indore,Madhya Pradesh,Central,A,1950,2019-09-01,store,WH-IND,AM-02
+IND-02,Indore,Madhya Pradesh,Central,B,1140,2023-01-15,store,WH-IND,AM-02
+BHO-01,Bhopal,Madhya Pradesh,Central,A,1800,2020-11-01,store,WH-IND,AM-02
+NAG-01,Nagpur,Maharashtra,Central,B,1260,2024-04-01,store,WH-IND,AM-03
+PUN-01,Pune,Maharashtra,West,A,2040,2026-09-20,store,WH-IND,AM-03
+JAI-OUT,Jaipur,Rajasthan,North,Outlet,1500,2020-01-01,outlet,WH-JAI,AM-01

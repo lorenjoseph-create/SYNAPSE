@@ -1,10 +1,9 @@
-"""StockFlow AI app (customized for Manyavar): upload a data pack, get the day's stock moves explained in plain language.
+"""StockFlow app: upload a brand's data pack, get the day's stock moves, their money, and the trips to approve.
 
-Start:  streamlit run app.py   (or double-click "Start Stock Mover.bat")
+Start:  streamlit run app.py
 """
-import base64
 import io
-import re
+import json
 import shutil
 import tempfile
 import zipfile
@@ -12,653 +11,485 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
+import auth
 import chat
+import engine as E
 import feedback as fb
 import insights as ins
-import stock_mover as sm
-from insights import inr
+import schema
 
-ASSETS = Path(__file__).parent / "assets"
-_icon = ASSETS / "icon.png"
-st.set_page_config(page_title="StockFlow AI · Manyavar", page_icon=str(_icon) if _icon.exists() else "📦", layout="wide", initial_sidebar_state="collapsed")
+HERE = Path(__file__).parent
+BRANDS = sorted((HERE / "brands").glob("*.json"))
+DEMO = HERE / "data" / "demo"
+st.set_page_config(page_title="StockFlow · stock planning for apparel retail", page_icon="📦", layout="wide",
+                   initial_sidebar_state="collapsed")
 
-# ----------------------------------------------------------------------------- look & feel (Manyavar brand: desktop + phone)
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Rufina:wght@400;700&display=swap');
-:root{--mv-orange:#E04E1C;--mv-orange-d:#C9431A;--mv-ember:#E95827;--mv-brown:#511D00;--mv-maroon:#66142E;--mv-gold:#D4A017;
-      --mv-cream:#FFFBF2;--mv-cream-2:#FFF3DD;--mv-sand:#E1CEAC;--mv-ink:#222222;--mv-grey:#626262}
-html,body,.stApp,.stMarkdown,.stMarkdown p,.stMarkdown li,.stCaption,button,input,textarea,label,[data-testid="stWidgetLabel"] p{font-family:'Figtree',sans-serif}
-[data-testid="stIconMaterial"],.material-symbols-rounded{font-family:'Material Symbols Rounded'!important}
-h1,h2,h3,h4,.mv-serif,h1 *,h2 *,h3 *,h4 *{font-family:'Rufina',Georgia,serif!important;font-weight:700!important;letter-spacing:0;font-variant-numeric:lining-nums}
-h2,h3,h4{color:var(--mv-ink)}
-h1 .num{font-family:'Figtree',sans-serif!important;font-weight:600!important;color:var(--mv-orange)}
-h1{color:var(--mv-brown)!important}
-/* buttons: solid ember like manyavar.com, lightly squared, spaced capitals */
-.stButton>button,.stDownloadButton>button,.stFormSubmitButton>button{border-radius:4px!important;text-transform:uppercase;letter-spacing:.07em;font-weight:600!important;font-size:.82rem!important;border:1px solid var(--mv-orange)!important;color:var(--mv-orange)!important;background:#fff!important}
-.stButton>button p,.stDownloadButton>button p,.stFormSubmitButton>button p{font-weight:600!important;font-size:.82rem!important}
-.stButton>button:hover,.stDownloadButton>button:hover,.stFormSubmitButton>button:hover{background:var(--mv-cream-2)!important}
-.stButton>button[kind="primary"],.stDownloadButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{background:var(--mv-orange)!important;color:#fff!important;box-shadow:0 2px 8px rgba(224,78,28,.22)}
-.stButton>button[kind="primary"]:hover,.stDownloadButton>button[kind="primary"]:hover,.stFormSubmitButton>button[kind="primary"]:hover{background:var(--mv-orange-d)!important;border-color:var(--mv-orange-d)!important}
-.stButton>button:disabled{opacity:.45;cursor:not-allowed}
-/* tabs */
-.stTabs [data-baseweb="tab-list"]{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:thin;gap:.1rem;border-bottom:1px solid var(--mv-sand)}
-.stTabs [data-baseweb="tab"]{white-space:nowrap;padding:0 .7rem}
-.stTabs [data-baseweb="tab"] p{text-transform:uppercase;letter-spacing:.06em;font-size:.8rem;font-weight:600;color:var(--mv-grey)}
-.stTabs [aria-selected="true"] p{color:var(--mv-orange)!important}
-.stTabs [data-baseweb="tab-highlight"]{background:var(--mv-orange)!important;height:3px}
-/* inputs and panels */
-[data-testid="stFileUploaderDropzone"]{border:1.5px dashed var(--mv-sand)!important;background:#fff!important}
-[data-testid="stExpander"] details{border-color:var(--mv-sand)!important;background:#fff;border-radius:6px}
-[data-testid="stVerticalBlockBorderWrapper"]{border-color:var(--mv-sand)!important}
-/* utility strip + header, like the top of manyavar.com */
-.mv-strip{position:relative;left:50%;right:50%;margin:-1rem -50vw 0;width:100vw;background:var(--mv-brown);color:#FCF9F5;text-align:center;
-          font-size:.7rem;letter-spacing:.16em;text-transform:uppercase;padding:.45rem .5rem;font-weight:500}
-.mv-strip b{color:#F5C46B;font-weight:600}
-.mv-head{display:flex;align-items:center;gap:.75rem;padding:1rem 0 .9rem;margin:0 0 1.2rem;border-bottom:1px solid var(--mv-sand)}
-.mv-head .nm{font-family:'Rufina',Georgia,serif;font-weight:700;font-size:1.55rem;color:var(--mv-brown);line-height:1}
-.mv-head .nm span{color:var(--mv-orange)}
-.mv-head .tag{font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--mv-grey);margin-top:.25rem}
-.mv-head .for{margin-left:auto;display:flex;align-items:center;gap:.55rem;font-size:.66rem;letter-spacing:.16em;text-transform:uppercase;color:var(--mv-grey)}
-.mv-head .for img{height:38px;width:auto}
-/* hero: serif headline on a warm, festive panel */
-.mv-hero{position:relative;overflow:hidden;border-radius:6px;padding:2.6rem 2.4rem 2.1rem;margin:0 0 1.5rem;color:#FCF9F5;
-         background:radial-gradient(130% 160% at 100% 0%,#8A2A12 0%,#66142E 42%,#3A0B14 100%);border:1px solid rgba(212,160,23,.5)}
-.mv-hero:before{content:"";position:absolute;inset:8px;border:1px solid rgba(245,196,107,.35);border-radius:3px;pointer-events:none}
-.mv-hero:after{content:"";position:absolute;right:-70px;top:-70px;width:300px;height:300px;border-radius:50%;
-               background:repeating-radial-gradient(circle,rgba(245,196,107,.18) 0 2px,transparent 2px 15px);pointer-events:none}
-.mv-hero .eb{color:#F5C46B;font-size:.72rem;font-weight:600;letter-spacing:.22em;text-transform:uppercase;margin:0 0 .6rem}
-.mv-hero h1{font-family:'Rufina',Georgia,serif!important;font-size:3rem!important;line-height:1.08;margin:0 0 .8rem!important;padding:0!important;color:#FFFBF2!important}
-.mv-hero p{color:#F6E7D6;font-size:1.03rem;line-height:1.65;margin:0;max-width:760px;position:relative;z-index:1}
-.mv-hero b{color:#fff}
-.mv-orn{display:flex;align-items:center;gap:.6rem;margin-top:1.2rem;color:#F5C46B;max-width:300px}
-.mv-orn:before,.mv-orn:after{content:"";flex:1;height:1px;background:linear-gradient(90deg,transparent,rgba(245,196,107,.85),transparent)}
-/* cards */
-.block-container{padding-top:3.2rem;padding-bottom:5rem;max-width:1180px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.7rem;margin:.4rem 0 1.1rem}
-.kpi{border:1px solid var(--mv-sand);border-top:3px solid var(--mv-orange);border-radius:6px;padding:.85rem 1rem;background:#fff}
-.kpi .l{font-size:.7rem;color:var(--mv-grey);text-transform:uppercase;letter-spacing:.12em;font-weight:600}
-.kpi .v{font-family:'Figtree',sans-serif;font-size:1.65rem;font-weight:700;line-height:1.2;margin:.2rem 0;color:var(--mv-brown);font-variant-numeric:lining-nums tabular-nums}
-.kpi .s{font-size:.78rem;color:var(--mv-grey)}
-.ins{border:1px solid var(--mv-sand);border-left:4px solid var(--c);padding:.7rem .95rem;margin:.55rem 0;border-radius:6px;background:#fff;line-height:1.5;color:var(--mv-ink)}
-.ins b{color:var(--mv-brown)}
-.pill{display:inline-block;padding:.12rem .6rem;border-radius:3px;font-size:.72rem;font-weight:600;color:#fff;letter-spacing:.04em}
-[data-testid="stChatMessage"]{background:#fff;border:1px solid var(--mv-sand);border-radius:6px}
-@media (max-width:640px){
-  .block-container{padding-left:.7rem;padding-right:.7rem;padding-top:2.8rem}
-  h1{font-size:1.5rem!important} h2{font-size:1.2rem!important} h3{font-size:1.05rem!important}
-  .mv-strip{font-size:.6rem;letter-spacing:.1em;white-space:nowrap}.mv-lg{display:none}
-  .block-container{padding-top:3.6rem!important}
-  .mv-head{flex-wrap:wrap;gap:.5rem}.mv-head .nm{font-size:1.3rem}.mv-head .for{margin-left:0;width:100%}.mv-head .for img{height:30px}
-  .mv-hero{padding:1.6rem 1.3rem 1.4rem}.mv-hero h1{font-size:2rem!important}
-  .kpis{grid-template-columns:1fr 1fr;gap:.45rem}
-  .kpi{padding:.6rem .7rem}.kpi .v{font-size:1.2rem}.kpi .s{font-size:.7rem}
-}
+
+def css(color):
+    st.markdown(f"""<style>
+:root{{--p:{color};--line:#e4e1dc;--grey:#5f6368}}
+.block-container{{padding-top:2.6rem;padding-bottom:4rem;max-width:1180px}}
+.sf-head{{display:flex;align-items:center;gap:.7rem;padding:.4rem 0 .8rem;margin-bottom:1rem;border-bottom:1px solid var(--line)}}
+.sf-head .nm{{font-weight:700;font-size:1.4rem}} .sf-head .nm span{{color:var(--p)}}
+.sf-head .tag{{font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--grey)}}
+.sf-head .for{{margin-left:auto;font-size:.8rem;color:var(--grey)}}
+.kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.6rem;margin:.3rem 0 1rem}}
+.kpi{{border:1px solid var(--line);border-top:3px solid var(--p);border-radius:6px;padding:.75rem .9rem;background:#fff}}
+.kpi .l{{font-size:.68rem;color:var(--grey);text-transform:uppercase;letter-spacing:.1em;font-weight:600}}
+.kpi .v{{font-size:1.5rem;font-weight:700;margin:.15rem 0;font-variant-numeric:tabular-nums}}
+.kpi .s{{font-size:.76rem;color:var(--grey)}}
+.ins{{border:1px solid var(--line);border-left:4px solid var(--c);padding:.6rem .9rem;margin:.5rem 0;border-radius:6px;background:#fff;line-height:1.5}}
+.warn{{background:#fff4e5;border:1px solid #f0c27b;border-radius:6px;padding:.5rem .8rem;font-size:.85rem;margin-bottom:.8rem}}
+.stTabs [data-baseweb="tab-list"]{{overflow-x:auto;flex-wrap:nowrap}}
+@media (max-width:640px){{.block-container{{padding-left:.7rem;padding-right:.7rem}}.kpis{{grid-template-columns:1fr 1fr}}.kpi .v{{font-size:1.15rem}}}}
 </style>""", unsafe_allow_html=True)
 
 
-def _data_uri(p, mime):
-    return f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode()}" if p.exists() else ""
+def kpi_cards(items):
+    st.markdown('<div class="kpis">' + "".join(f'<div class="kpi"><div class="l">{l}</div><div class="v">{v}</div><div class="s">{s}</div></div>'
+                                                for l, v, s in items) + "</div>", unsafe_allow_html=True)
 
 
-LOGO = _data_uri(ASSETS / "logo.svg", "image/svg+xml")
-MANYAVAR = _data_uri(ASSETS / "manyavar.png", "image/png")
-
-
-def brand_bar():
-    st.markdown('<div class="mv-strip">StockFlow AI · <b>customized for Manyavar</b>'
-                '<span class="mv-lg"> · right stock · right store · right size</span></div>', unsafe_allow_html=True)
-    partner = (f'<div class="for">customized for<img src="{MANYAVAR}" alt="Manyavar"></div>' if MANYAVAR else "")
-    st.markdown(f'<div class="mv-head"><img src="{LOGO}" width="44" height="44" alt="">'
-                f'<div><div class="nm">StockFlow <span>AI</span></div><div class="tag">Daily stock planning</div></div>'
-                f'{partner}</div>', unsafe_allow_html=True)
-
-
-TYPE_COLORS = {sm.T_WH: "#E04E1C", sm.T_S2S: "#D4A017", sm.T_DISP: "#511D00", sm.T_AGE: "#A0522D", sm.T_PULL: "#66142E"}
-TYPE_PLAIN = {
-    sm.T_WH: ("Send from warehouse", "Stores that will run out soon get stock from the warehouse. When there isn't enough "
-                                     "for everyone, the store that will run out first is served first."),
-    sm.T_S2S: ("Move between stores", "When the warehouse has none, we borrow from a store that has plenty, but only if it "
-                                      "still keeps at least 30 days' worth."),
-    sm.T_DISP: ("Fill the display", "Every store must show a minimum number of pieces in each category."),
-    sm.T_AGE: ("Old stock to where it sells", "Stock that has sat for months goes to a store where the same item sells well."),
-    sm.T_PULL: ("Back to warehouse", "Old stock no store is selling returns to the warehouse, freeing shelf space."),
-}
-ISSUE_PLAIN = {
-    "Stock records disagree": ("Two stock records don't match", "We could plan to move stock that isn't really there.",
-                               "Trusted the physical weekly count, didn't move this stock, asked the store to recount."),
-    "Negative stock": ("A store shows less than zero pieces", "You can't hold minus pieces, so it's a recording mistake.",
-                       "Used the weekly count (or zero) and asked for a recount."),
-    "Hidden stockout": ("Sizes that look slow but just weren't on the shelf",
-                        "Zero sales because of zero stock is not zero demand. These sales are being lost quietly.",
-                        "Measured selling speed only on days in stock, and refilled them."),
-    "Under-stocked store": ("A busy store with half-empty shelves", "Customers can't find their size and walk out.",
-                            "This store gets priority in today's refill."),
-    "Over capacity": ("A store holding more than it can", "Either the record is wrong or the store is overloaded.",
-                      "No more stock is sent until it's sorted."),
-    "Warehouse shortfall": ("Not enough stock in the warehouse", "Stores need more than the warehouse holds as wedding season starts.",
-                            "Shared by who runs out first, plus safe moves between stores."),
-    "Dead style": ("A design that never sells", "It ties up money and shelf space.", "Pulled back. Buying should stop re-ordering it."),
-    "Sold-out hit": ("Best-sellers that ran out, not slow sellers",
-                     "Sales fell because the shelves were empty, not because customers stopped wanting it. "
-                     "Treating it as slow would throw away the wedding-season demand.",
-                     "Flagged for re-order (or moved to the stores that sell it) and never pulled back as dead stock."),
-    "New launch": ("A new design with little history", "Few sales so far doesn't mean slow; it's just new.",
-                   "Selling speed measured only on days it was on the shelf."),
-    "New store": ("A store that just opened", "Too little history to know what it will sell.",
-                  "Used similar stores as a guide until its own sales build up."),
-    "Below minimum display after plan": ("A display still below minimum", "No safe source of stock.", "Flagged to buying."),
-    "Lead time missing": ("No delivery time for a zone", "Needed to plan arrival dates.", "Assumed the longest delivery time."),
-}
-RULE_PLAIN = {
-    "Every move has a positive quantity and different from/to": "Each move ships at least one piece to a different place.",
-    "Every move is explained in one line": "Each move has a one-line reason.",
-    "Stores only give stock they physically hold (not in-transit)": "Stores never give away stock they don't have on the shelf.",
-    "Warehouse never sends more than on hand + inbound due": "The warehouse never ships more than it has.",
-    "No receiving store ends above its capacity (on hand + in transit + incoming)": "No store gets more than it can hold.",
-    "Giving stores stay at or above minimum display per category": "Stores giving stock still keep their minimum display.",
-    "S++ flagships never give away their top-20 styles": "Super-flagships keep their 20 best designs.",
-    "No store-to-store move leaves the giver under 30 days of style cover": "A giving store keeps at least 30 days' worth.",
-    "In-transit stock counted: never replenish a size already covered by stock + transit": "Stock already on a truck counts, so nothing is sent twice.",
-    "No store both gives and receives the same SKU": "No store sends and receives the same item.",
-    "Moves above Rs 1,00,000 at MRP are flagged for approval": "Moves over ₹1 lakh are flagged for sign-off.",
-}
-EXAMPLES = ["What are the key insights today?", "Which stores need the most stock?", "Why is MZF-01 a problem?",
-            "What needs approval?", "What happened with the KNP-03 sherwanis?", "Tell me about KUR-04"]
-
-
-def style(fig, h=320, legend=True):
-    fig.update_layout(height=h, margin=dict(l=4, r=4, t=44, b=4), font=dict(size=12, family="Figtree, sans-serif", color="#222222"), title_font=dict(size=15, family="Rufina, Georgia, serif", color="#511D00"),
-                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      legend=dict(orientation="h", yanchor="top", y=-0.18, x=0, title="") if legend else None,
-                      showlegend=legend)
-    return fig
+def insight(text, color):
+    import re
+    st.markdown(f'<div class="ins" style="--c:{color}">{re.sub(r"[*][*](.+?)[*][*]", r"<b>\1</b>", text)}</div>', unsafe_allow_html=True)
 
 
 def plot(fig, h=320, legend=True):
-    st.plotly_chart(style(fig, h, legend), use_container_width=True, config={"displayModeBar": False, "responsive": True})
+    fig.update_layout(height=h, margin=dict(l=4, r=4, t=44, b=4), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      legend=dict(orientation="h", yanchor="top", y=-0.2, x=0, title="") if legend else None, showlegend=legend)
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
-def kpi_cards(items):
-    st.markdown('<div class="kpis">' + "".join(
-        f'<div class="kpi"><div class="l">{l}</div><div class="v">{v}</div><div class="s">{s}</div></div>'
-        for l, v, s in items) + "</div>", unsafe_allow_html=True)
+def header(cfg):
+    st.markdown(f'<div class="sf-head"><div style="font-size:1.9rem">📦</div><div><div class="nm">Stock<span>Flow</span></div>'
+                f'<div class="tag">Daily stock planning for apparel retail</div></div>'
+                f'<div class="for">{cfg["brand"]["name"]}</div></div>', unsafe_allow_html=True)
 
 
-def insight(text, color="#E04E1C"):
-    html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    st.markdown(f'<div class="ins" style="--c:{color}">{html}</div>', unsafe_allow_html=True)
+# ----------------------------------------------------------------------------- sign in
+USERS = auth.users(st.secrets if hasattr(st, "secrets") else None)
+if USERS and "user" not in st.session_state:
+    css("#2F5D62")
+    header(schema.DEFAULTS)
+    with st.form("login"):
+        u = st.text_input("User name")
+        p = st.text_input("Password", type="password")
+        if st.form_submit_button("Sign in", type="primary"):
+            rec = USERS.get(u.strip())
+            if rec and auth.check_password(p, rec.get("password", "")):
+                st.session_state.user, st.session_state.role = u.strip(), rec.get("role", "viewer")
+                st.session_state.scope = [s.strip() for s in str(rec.get("stores", "")).split(",") if s.strip()]
+                st.rerun()
+            st.error("User name or password not recognised.")
+    st.stop()
+USER = st.session_state.get("user", "demo")
+ROLE = st.session_state.get("role", "admin" if not USERS else "viewer")
+OPEN = not USERS
 
 
 # ----------------------------------------------------------------------------- data in
 def unpack(uploads, dest):
+    cfg_over = None
     for f in uploads:
-        name = Path(f.name).name
-        data = f.getvalue()
+        name, data = Path(f.name).name, f.getvalue()
         if name.lower().endswith(".zip"):
             with zipfile.ZipFile(io.BytesIO(data)) as z:
                 for m in z.infolist():
                     p = Path(m.filename)
-                    if m.is_dir() or p.is_absolute() or ".." in p.parts or p.suffix.lower() not in (".csv", ".xlsx", ".xlsm"):
+                    if m.is_dir() or p.is_absolute() or ".." in p.parts:
                         continue
-                    out = dest / "zip" / p
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_bytes(z.read(m))
+                    if p.suffix.lower() in (".csv", ".xlsx", ".xlsm"):
+                        out = dest / "zip" / p
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        out.write_bytes(z.read(m))
+                    elif p.name.lower() == "config.json":
+                        cfg_over = json.loads(z.read(m))
         elif name.lower().endswith((".csv", ".xlsx", ".xlsm")):
             (dest / name).write_bytes(data)
+        elif name.lower() == "config.json" or name.lower().endswith(".json"):
+            cfg_over = json.loads(data)
+    return cfg_over
 
 
-def run_engine(source, settings):
-    old = dict(sm.CFG)
-    sm.CFG.update(settings)
-    try:
-        R = sm.run(source, Path(tempfile.mkdtemp(prefix="stockmover_out_")))
-        R["cfg"] = dict(sm.CFG)
-        return R
-    finally:
-        sm.CFG.clear()
-        sm.CFG.update(old)
+def template_zip():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, txt in schema.template_csvs().items():
+            z.writestr(f"stockflow_template/{n}", txt)
+        z.writestr("stockflow_template/config.json", json.dumps({k: schema.DEFAULTS[k] for k in ("brand", "planning", "economics", "season")}, indent=2))
+        z.writestr("stockflow_template/DATA_GUIDE.csv", pd.DataFrame(schema.guide_rows()).to_csv(index=False))
+    return buf.getvalue()
 
 
-def data_panel(expanded):
-    saved = fb.load_settings()
-    ups = st.file_uploader("Upload the data pack: a zip of the CSVs, the Excel workbook, or the CSV files",
-                           type=["zip", "csv", "xlsx", "xlsm"], accept_multiple_files=True, key="ups")
-    with st.expander("⚙️ Settings" + (" (tuned by feedback)" if fb.SETTINGS.exists() else "")):
-        vals = {}
-        for k, (lo, hi, step, name) in fb.TUNABLE.items():
-            vals[k] = st.slider(name, lo, hi, int(saved[k]), step=1, key=f"set_{k}")
-        st.caption("Business rules (30-day cover for giving stores, minimum display, capacity, flagship protection) never change.")
-    with st.expander("📄 Which files do I need?"):
-        st.dataframe(pd.DataFrame([(t, ", ".join(c)) for t, c in sm.REQUIRED.items()], columns=["table", "columns"]),
-                     hide_index=True, use_container_width=True)
-    c1, c2 = st.columns(2)
-    go_btn = c1.button("▶️ Run StockFlow AI", type="primary", disabled=not ups, use_container_width=True)
-    sample = c2.button("✨ Try the sample data", type="primary", use_container_width=True, disabled=not sm.DEFAULT_DATA.exists())
-    if go_btn or sample:
-        tmp = Path(tempfile.mkdtemp(prefix="stockmover_in_"))
+def data_guide():
+    rows = pd.DataFrame(schema.guide_rows())
+    need = {"required": "🔴 required", "recommended": "🟠 recommended", "optional": "⚪ optional"}
+    sheets = rows.drop_duplicates("sheet")[["sheet", "sheet_need"]].assign(
+        purpose=[schema.TABLES[s.replace(".csv", "")][1] for s in rows.drop_duplicates("sheet").sheet])
+    sheets["sheet_need"] = sheets.sheet_need.map(need)
+    st.markdown("**Minimum to start (4 sheets):** stores, items, sales, stock_snapshot. **Recommended:** stock_weekly (catches hidden "
+                "stockouts), inbound, lanes (real freight costs), cost_price in items. Everything else switches on extra features. "
+                "CSV files, one Excel workbook with one tab per sheet, or a zip of either. Column names are not case-sensitive; "
+                "common alternatives (state→region, bills+bill_lines→sales…) are understood. Customer and staff columns are dropped on load.")
+    st.dataframe(sheets, hide_index=True, width="stretch",
+                 column_config={"sheet_need": "need", "purpose": st.column_config.TextColumn(width="large")})
+    with st.expander("Every column"):
+        st.dataframe(rows.assign(column_need=rows.column_need.map(need)), hide_index=True, width="stretch", height=420)
+    st.download_button("⬇️ Download blank templates + data guide (zip)", template_zip(), "stockflow_templates.zip", key=f"tpl{id(rows)}")
+
+
+def run_engine(source, cfg):
+    return E.run(source, Path(tempfile.mkdtemp(prefix="stockflow_out_")), cfg)
+
+
+def data_panel():
+    c1, c2 = st.columns([3, 2])
+    ups = c1.file_uploader("Upload your data pack: a zip, an Excel workbook or the CSV files (add config.json for brand settings)",
+                           type=["zip", "csv", "xlsx", "xlsm", "json"], accept_multiple_files=True, key="ups")
+    brand = c2.selectbox("Settings profile", ["Standard settings"] + [b.stem for b in BRANDS], key="brand_pick")
+    base = schema.load_config(HERE / "brands" / f"{brand}.json" if brand != "Standard settings" else None, fb.load_settings())
+    with st.expander("⚙️ Settings" + ("" if auth.can(ROLE, "admin") else " (admin only)")):
+        dis = not auth.can(ROLE, "admin")
+        a, b, c = st.columns(3)
+        base["brand"]["name"] = a.text_input("Brand name", base["brand"]["name"], disabled=dis)
+        base["brand"]["number_style"] = b.selectbox("Number style", ["indian", "international"],
+                                                    index=0 if base["brand"]["number_style"] == "indian" else 1, disabled=dis)
+        base["brand"]["currency"] = c.text_input("Currency symbol", base["brand"]["currency"], disabled=dis)
+        for (sec, k), (lo, hi, step, name) in schema.TUNABLE.items():
+            base[sec][k] = st.slider(name, lo, hi, int(base[sec][k]), step=step, key=f"s_{sec}_{k}", disabled=dis)
+        a, b = st.columns(2)
+        base["planning"]["approval_value"] = a.number_input("Line value needing sign-off (MRP)", value=int(base["planning"]["approval_value"]),
+                                                            step=10000, disabled=dis)
+        base["planning"]["trip_approval_value"] = b.number_input("Trip value needing sign-off (MRP)",
+                                                                 value=int(base["planning"]["trip_approval_value"]), step=50000, disabled=dis)
+        a, b, c = st.columns(3)
+        base["economics"]["handling_per_unit"] = a.number_input("Handling cost per piece", value=float(base["economics"]["handling_per_unit"]), disabled=dis)
+        base["economics"]["default_cost_ratio"] = b.number_input("Cost as share of MRP (if no cost_price)", value=float(base["economics"]["default_cost_ratio"]),
+                                                                 min_value=0.05, max_value=0.95, step=0.05, disabled=dis)
+        base["economics"]["markdown_per_month"] = c.number_input("Value old stock loses per month", value=float(base["economics"]["markdown_per_month"]),
+                                                                 min_value=0.0, max_value=0.3, step=0.01, disabled=dis)
+        st.caption("Freight per lane comes from lanes.csv; routes it doesn't cover use the defaults in the config. Business rules never relax.")
+    with st.expander("📄 What data do I need?"):
+        data_guide()
+    a, b = st.columns(2)
+    go_btn = a.button("▶️ Plan with my data", type="primary", disabled=not ups, width="stretch")
+    demo = b.button("✨ Try the demo brand", width="stretch", disabled=not DEMO.exists())
+    if go_btn or demo:
+        tmp = Path(tempfile.mkdtemp(prefix="stockflow_in_"))
         try:
             if go_btn:
-                unpack(ups, tmp)
+                over = unpack(ups, tmp)
+                cfg = schema.merge(base, over) if over else base
                 source, label = tmp, ", ".join(f.name for f in ups)[:120]
             else:
-                source, label = sm.DEFAULT_DATA, "sample data pack"
-            with st.spinner("Reading the data, measuring how fast every size sells, planning moves… (about 30 seconds)"):
-                R = run_engine(source, vals)
-            st.session_state.R = R
-            st.session_state.label = label
-            st.session_state.run_id = fb.log_run(R, label, vals)
-            st.session_state.ctx = chat.build_context(R)
+                cfg = schema.load_config(HERE / "brands" / "demo.json", fb.load_settings())
+                source, label = DEMO, "demo brand (fictional)"
+            with st.spinner("Checking the data, measuring selling speed, planning and costing every move…"):
+                R = run_engine(source, cfg)
+            st.session_state.R, st.session_state.label = R, label
+            st.session_state.run_id = fb.log_run(R, label, USER)
             st.session_state.chat = []
+            st.session_state.pop("ctx", None)
             st.rerun()
-        except sm.DataError as e:
-            st.error("**The data isn't quite what StockFlow AI needs.** Please fix:\n\n" + "\n".join(f"- {p}" for p in str(e).splitlines()))
+        except E.DataError as e:
+            st.error("**The data isn't quite what StockFlow needs.** Please fix:\n\n" + "\n".join(f"- {p}" for p in str(e).splitlines()))
         except Exception as e:  # noqa: BLE001
-            st.error(f"Something went wrong while planning: {e}")
+            st.error(f"Something went wrong while planning: {type(e).__name__}: {e}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
 if "R" not in st.session_state:
-    brand_bar()
-    st.markdown(
-        '<div class="mv-hero"><p class="eb">StockFlow AI for Manyavar · Right stock · Right store · Right size</p>'
-        '<h1>Stock in the right store, every morning.</h1>'
-        '<p>Every day, some stock is in the <b>wrong place</b>: one store runs out of a size customers want, while '
-        'another has the same size sitting unsold. StockFlow AI finds those problems and writes a '
-        '<b>ready-to-approve list</b>: 🚚 send from the warehouse · 🔁 move between stores · ↩️ bring back to the warehouse.</p>'
-        '<div class="mv-orn">✦</div></div>',
-        unsafe_allow_html=True)
-    data_panel(True)
+    css("#2F5D62")
+    header(schema.DEFAULTS)
+    if OPEN:
+        st.markdown('<div class="warn">🔓 <b>Open demo mode</b>: no sign-in is configured. Use the demo brand, or set up users '
+                    '(see auth.py) before uploading real data.</div>', unsafe_allow_html=True)
+    st.markdown("### Right stock, right store, right size: every morning")
+    st.markdown("Upload yesterday's sales and stock. StockFlow returns a short list of **trips** to approve: refills before stores run out, "
+                "broken size sets completed, old stock moved to where it sells, and slow stock brought back a few pieces at a time. "
+                "Every move shows **what it earns and what it costs to move**, and moves that don't pay for themselves are left out.")
+    data_panel()
     st.stop()
 
 # ----------------------------------------------------------------------------- results
 R = st.session_state.R
-pl, mv, ex, val, alerts = R["pl"], R["moves"].copy(), R["issues"], R["checks"], R["alerts"]
-P, g, stores, WH = R["P"], pl.g, pl.st, R["warehouse"]
-mv["kind"] = mv.type.map(lambda t: TYPE_PLAIN[t][0])
+cfg = R["cfg"]
+css(cfg["brand"].get("primary_color", "#2F5D62"))
+M = lambda v: E.money(v, cfg)
+pl, mv, ex, val, tr, O = R["pl"], R["moves"], R["issues"], R["checks"], R["trips"], R["opportunity"]
+P, g, stores = R["P"], pl.g, pl.st
+SCOPE = st.session_state.get("scope") or []
+if SCOPE:  # a user limited to some stores sees only their trips
+    mv = mv[mv.from_id.isin(SCOPE) | mv.to_id.isin(SCOPE)]
+    tr = tr[tr.from_id.isin(SCOPE) | tr.to_id.isin(SCOPE)]
 L = ins.leadership(R)
-
-brand_bar()
-st.markdown(f'<h1>Stock plan <span class="num">· {pl.run:%a %d %b %Y}</span></h1>', unsafe_allow_html=True)
-st.caption(f"{st.session_state.label} · stock as of {P['today']:%d %b %Y} · {len(stores)} stores + {WH}")
+header(cfg)
+if OPEN:
+    st.markdown('<div class="warn">🔓 Open demo mode: anyone with the link can see this. Configure sign-in before using real data.</div>', unsafe_allow_html=True)
+st.markdown(f"### Stock plan · {pl.run:%a %d %b %Y}")
+st.caption(f"{st.session_state.label} · stock as of {P['today']:%d %b %Y} · {len(stores)} stores · warehouses {', '.join(pl.whs)} · "
+           f"signed in as {USER} ({ROLE})")
 with st.expander("📂 Load new data or change settings"):
-    data_panel(False)
+    data_panel()
 
-T = st.tabs(["⭐ Leaders", "📋 Plan", "🔍 Problems", "🏬 Stores", "✅ Approve", "💬 Ask", "📝 Feedback", "ℹ️ Method"])
+T = st.tabs(["⭐ Summary", "💰 Money", "🚚 Trips", "🔍 Problems", "🏬 Stores", "✅ Approve", "📦 Track", "💬 Ask", "📝 Feedback", "📄 Data guide", "ℹ️ Method"])
+GCOL = dict(zip(E.GROUPS, ["#c0392b", "#e67e22", "#d35400", "#7f8c8d", "#2F5D62", "#8e44ad", "#9b59b6", "#34495e", "#16a085"]))
 
-# ---- Leaders: key insights only
 with T[0]:
-    st.subheader("Key insights")
     kpi_cards(L["kpis"])
     for color, text in L["insights"]:
         insight(text, color)
     st.markdown("#### Decisions needed")
-    for d in L["decisions"]:
+    for d in L["decisions"] or ["Nothing beyond approving today's trips."]:
         st.markdown(f"- {d}")
-    city = L["city"].reset_index(names="city").melt("city", var_name="", value_name="₹ lakh")
-    plot(px.bar(city, x="city", y="₹ lakh", color="", barmode="group", title="Impact by city (₹ lakh at MRP)",
-                color_discrete_sequence=["#E04E1C", "#A0522D"]), 300)
     passed = int((val.status == "PASS").sum())
-    r = fb.ratings()
-    rate = f" · team rating {r.stars.mean():.1f}★ from {len(r)} reviews" if not r.empty else ""
-    st.caption(f"Plan health: {passed}/{len(val)} business rules passed{rate}.")
+    st.caption(f"Plan health: {passed}/{len(val)} rules passed.")
     if R["xlsx"]:
-        st.download_button("⬇️ Full plan (Excel)", Path(R["xlsx"]).read_bytes(), file_name=Path(R["xlsx"]).name, key="xl1")
+        st.download_button("⬇️ Full plan (Excel)", Path(R["xlsx"]).read_bytes(), Path(R["xlsx"]).name, key="xl1")
 
-# ---- Plan
 with T[1]:
-    kpi_cards([("Moves", f"{len(mv):,}", f"{mv.from_id.nunique()} senders"), ("Pieces", f"{int(mv.qty.sum()):,}", "to move"),
-               ("Value", inr(mv.value_mrp.sum()), "at MRP"),
-               ("Urgent", f"{int((mv.priority == 'High').sum())}", "lines: store runs out before delivery")])
-    high = mv[mv.priority == "High"]
-    ev = pl.season.next_event(stores.state.iloc[0], pl.run, 45)
-    st.markdown("#### Today in plain words")
-    lines = []
-    if len(high):
-        lines.append(f"🔴 **{high.sku_id.nunique()} items in {high.to_id.nunique()} stores will run out before a normal delivery.** "
-                     f"{int(high.qty.sum()):,} pieces are on their way, arriving by {high.arrives.max():%d %b}.")
-    if ev:
-        lines.append(f"💍 **Busy season ahead:** {ev}. Wedding dates sell "
-                     + ", ".join(f"{(l.get('wedding date', 1) - 1) * 100:.0f}% more in {s}" for s, l in pl.season.lift.items()) + ".")
-    s2s = mv[mv.type == sm.T_S2S]
-    if len(s2s):
-        lines.append(f"🔁 **{int(s2s.qty.sum())} pieces move between stores** where the warehouse ran short, only from stores keeping 30+ days.")
-    old = mv[mv.type.isin([sm.T_AGE, sm.T_PULL])]
-    if len(old):
-        lines.append(f"🕸️ **{int(old.qty.sum())} old pieces** are moving: {int(mv[mv.type == sm.T_AGE].qty.sum())} to stores where "
-                     f"they sell, {int(mv[mv.type == sm.T_PULL].qty.sum())} back to the warehouse.")
-    for l in lines:
-        st.markdown(l)
-    by = mv.groupby("type").agg(pieces=("qty", "sum")).reset_index()
-    by["what"] = by.type.map(lambda t: TYPE_PLAIN[t][0])
-    plot(px.bar(by.sort_values("pieces"), x="pieces", y="what", color="type", color_discrete_map=TYPE_COLORS, orientation="h",
-                title="Pieces by kind of move", labels={"what": ""}), 280, legend=False)
-    st.markdown("#### What each kind of move means")
-    for t, (name, text) in TYPE_PLAIN.items():
-        n = mv[mv.type == t]
-        st.markdown(f'<span class="pill" style="background:{TYPE_COLORS[t]}">{int(n.qty.sum()):,} pcs</span> **{name}**: {text}',
-                    unsafe_allow_html=True)
-    st.markdown("#### Where stock goes")
-    pick = st.multiselect("Show", list(TYPE_PLAIN), default=[sm.T_WH, sm.T_S2S, sm.T_DISP],
-                          format_func=lambda t: TYPE_PLAIN[t][0])
-    f = mv[mv.type.isin(pick)]
-    if len(f):
-        city_of = lambda x: x if x == WH else stores.city[x]
-        cc = f.assign(fc=f.from_id.map(city_of), tc=f.to_id.map(city_of)).groupby(["fc", "tc"]).qty.sum().reset_index()
-        dot = ["digraph{rankdir=LR;bgcolor=transparent;node[shape=box style=\"rounded,filled\" fillcolor=\"#FFF3DD\" fontname=Helvetica];",
-               f'"{WH}"[fillcolor="#E04E1C" fontcolor=white label="Warehouse\\n{WH}"];']
-        for r in cc.itertuples():
-            lab = f"{r.qty} within city" if r.fc == r.tc else f"{r.qty}"
-            dot.append(f'"{r.fc}"->"{r.tc}"[label="{lab}" fontsize=10 penwidth={1 + min(r.qty / cc.qty.max() * 6, 6):.1f}];')
-        st.graphviz_chart("\n".join(dot) + "}", use_container_width=True)
-        with st.expander("Store-by-store flow diagram"):
-            agg = f.groupby(["from_id", "to_id", "type"]).qty.sum().reset_index()
-            src, dst = sorted(set(agg.from_id)), sorted(set(agg.to_id))
-            ix = {("f", s): i for i, s in enumerate(src)} | {("t", d): len(src) + i for i, d in enumerate(dst)}
-            rgba = lambda h: f"rgba({int(h[1:3], 16)},{int(h[3:5], 16)},{int(h[5:7], 16)},0.55)"
-            fig = go.Figure(go.Sankey(node=dict(label=src + dst, pad=10, thickness=12, color="#8C6E54"),
-                                      link=dict(source=[ix[("f", s)] for s in agg.from_id], target=[ix[("t", d)] for d in agg.to_id],
-                                                value=agg.qty, color=[rgba(TYPE_COLORS[t]) for t in agg.type])))
-            plot(fig, max(420, 20 * (len(src) + len(dst))), legend=False)
-    st.markdown("#### Area manager alerts")
-    st.caption("Each area manager reads at most 5 alerts a week, so these are their top 5.")
-    for am_name, grp in alerts.groupby("area_manager", sort=True):
-        with st.expander(am_name):
-            for r in grp.itertuples():
-                st.markdown(f"{r.rank}. {r.alert}")
+    st.markdown("#### What the plan earns, what it costs, and what is still being lost")
+    kpi_cards([("Gained", M(O["benefit"]), "margin + markdown & holding avoided"), ("Moving cost", M(O["move_cost"]), "freight, handling, trips"),
+               ("Net gain", M(O["net"]), f"{O['net'] / max(O['move_cost'], 1):.0f}× the cost"),
+               ("Saved by skipping", M(max(O["skipped_cost"] - O["skipped_benefit"], 0)), f"{len(R['skipped']) - O['held_small']} moves not worth making")])
+    by = O["by_group"]
+    if len(by):
+        d = by.melt("group", ["benefit", "move_cost"], var_name="", value_name="amount")
+        d[""] = d[""].map({"benefit": "Gained", "move_cost": "Moving cost"})
+        plot(px.bar(d, x="amount", y="group", color="", barmode="group", orientation="h", title="Gain vs cost by reason",
+                    labels={"group": "", "amount": cfg["brand"]["currency"]}, color_discrete_sequence=["#2F5D62", "#c0392b"]), 360)
+        st.dataframe(by.assign(**{c: by[c].map(M) for c in ("benefit", "move_cost", "net")}), hide_index=True, width="stretch")
+    st.markdown("#### Opportunity cost of doing nothing")
+    st.markdown(f"- If today's trips are **not** sent, the brand gives up about **{M(O['benefit'])}** (lost margin on stock-outs, markdowns "
+                f"and holding cost on old stock).\n"
+                f"- Even after the plan, **{M(O['still_at_risk'])}** of margin is at risk where no safe stock exists: that is the case for re-ordering.\n"
+                f"- Old stock still in stores ({O['aged_left_pieces']:,} pieces) costs about **{M(O['aged_cost_per_month'])} a month** "
+                f"in holding cost and lost value.")
+    st.caption("How it is worked out: expected extra pieces sold (Poisson demand over lead time + cover, minus what the giving store "
+               "would have sold) × margin (net price after real discount and tax − cost); old stock also earns the markdown and holding cost "
+               "it avoids. Costs: freight per piece and per trip from lanes.csv, plus handling per piece.")
+    sk = R["skipped"]
+    if len(sk):
+        with st.expander(f"Not worth moving · {len(sk)} lines"):
+            st.dataframe(sk[["group", "from_id", "to_id", "style_name", "size", "qty", "benefit", "move_cost", "skip_why"]].round(0),
+                         hide_index=True, width="stretch")
 
-# ---- Problems
 with T[2]:
-    st.markdown("Problems found in the data: **what they mean**, **why they matter**, and **what we did**.")
-    weekly, sales = R["weekly"], R["sales"]
-    order = ["Stock records disagree", "Negative stock", "Under-stocked store", "Sold-out hit", "Hidden stockout", "Warehouse shortfall",
-             "Over capacity", "Dead style", "Below minimum display after plan", "New launch", "New store", "Lead time missing"]
-    for kind in sorted(ex.issue.unique(), key=lambda k: order.index(k) if k in order else 99):
-        grp = ex[ex.issue == kind]
-        title, why, did = ISSUE_PLAIN.get(kind, (kind, "", ""))
-        icon = "🔴" if (grp.severity == "High").any() else "🟡" if (grp.severity == "Medium").any() else "🔵"
+    kpi_cards([("Trips", f"{len(tr)}", f"{(tr.from_id.isin(pl.whs)).sum()} from warehouses"), ("Lines", f"{len(mv):,}", "one size of one option"),
+               ("Pieces", f"{int(mv.qty.sum()):,}", M(mv.value_mrp.sum()) + " at MRP"), ("Urgent trips", f"{int((tr.urgent > 0).sum())}", "a store runs out before a normal delivery")])
+    st.markdown("Each trip has **one line** saying why it goes; the size-by-size detail is under it.")
+    show = tr[["to_number", "from_id", "to_id", "pieces", "value_mrp", "net_benefit", "arrives", "reason"]].copy()
+    show["value_mrp"], show["net_benefit"] = show.value_mrp.map(M), show.net_benefit.map(M)
+    show["arrives"] = show.arrives.dt.strftime("%d %b")
+    st.dataframe(show, hide_index=True, width="stretch", height=380, column_config={"reason": st.column_config.TextColumn("why", width="large")})
+    pick = st.selectbox("Open a trip", tr.to_number, format_func=lambda t: f"{t} · " + " → ".join(tr.set_index("to_number").loc[t, ["from_id", "to_id"]]))
+    if pick:
+        key = tr.set_index("to_number").trip_key[pick]
+        st.dataframe(mv[mv.trip_key == key][["group", "style_name", "colour", "size", "qty", "net_benefit", "reason"]].round(0),
+                     hide_index=True, width="stretch")
+    d = mv.groupby("group").qty.sum().reindex(E.GROUPS).dropna().reset_index()
+    plot(px.bar(d, x="qty", y="group", orientation="h", color="group", color_discrete_map=GCOL, title="Pieces by reason", labels={"group": "", "qty": "pieces"}), 300, False)
+    if len(tr):
+        city = lambda x: x if x in pl.whs else stores.city[x]
+        cc = tr.assign(fc=tr.from_id.map(city), tc=tr.to_id.map(city)).groupby(["fc", "tc"]).pieces.sum().reset_index()
+        dot = ["digraph{rankdir=LR;bgcolor=transparent;node[shape=box style=\"rounded,filled\" fillcolor=\"#eef3f3\" fontname=Helvetica];"]
+        dot += [f'"{w}"[fillcolor="#2F5D62" fontcolor=white];' for w in pl.whs]
+        dot += [f'"{r.fc}"->"{r.tc}"[label="{r.pieces}" fontsize=10 penwidth={1 + min(r.pieces / cc.pieces.max() * 6, 6):.1f}];' for r in cc.itertuples()]
+        st.graphviz_chart("\n".join(dot) + "}", width="stretch")
+    if len(R["alerts"]):
+        st.markdown("#### Area manager alerts")
+        for name, grp in R["alerts"].groupby("manager"):
+            with st.expander(name):
+                for r in grp.itertuples():
+                    st.markdown(f"{r.rank}. {r.alert}")
+
+with T[3]:
+    sev = {"High": "🔴", "Medium": "🟡", "Info": "🔵"}
+    for kind, grp in ex.groupby("issue", sort=False):
         with st.container(border=True):
-            st.markdown(f"**{icon} {title}** · {len(grp)} found")
-            st.markdown(f"**Why it matters:** {why}  \n**What we did:** {did}")
-            fig = None
-            if kind in ("Stock records disagree", "Negative stock"):
-                sn = P["snap"]
-                rows = sn[(sn.closing_on_hand.notna() & (sn.closing_on_hand != sn.on_hand)) | (sn.on_hand < 0)]
-                d = pd.DataFrame({"item": rows.location_id + " " + rows.sku_id, "Stock file": rows.on_hand,
-                                  "Weekly count": rows.closing_on_hand.fillna(0)}).melt("item", var_name="record", value_name="pieces")
-                fig = px.bar(d, x="item", y="pieces", color="record", barmode="group", title="The two records side by side",
-                             color_discrete_sequence=["#66142E", "#E04E1C"])
-            elif kind == "Hidden stockout":
-                hs = ins.hidden_stockouts(R)
-                d = hs.groupby("store_id").agg(sizes=("sku_id", "size"), lakh=("at_risk", "sum")).reset_index()
-                d["lakh"] = d.lakh / 1e5
-                fig = px.bar(d.sort_values("lakh"), x="lakh", y="store_id", orientation="h", text="sizes",
-                             title="Sales at risk next 30 days (₹ L) · label = sizes missing", labels={"lakh": "₹ lakh", "store_id": ""},
-                             color_discrete_sequence=["#66142E"])
-            elif kind == "Under-stocked store":
-                s = grp.store.iloc[0]
-                w = weekly[weekly.store_id.isin(stores.index)].groupby(["week", "store_id"]).days_in_stock.mean().reset_index()
-                w["who"] = w.store_id.where(w.store_id == s, "other stores")
-                d = w.groupby(["week", "who"]).days_in_stock.mean().reset_index()
-                fig = px.line(d, x="week", y="days_in_stock", color="who", markers=True,
-                              title=f"Days a week a size is on the shelf (7 = always)", labels={"days_in_stock": "days", "week": ""},
-                              color_discrete_map={s: "#66142E", "other stores": "#E1CEAC"})
-                fig.update_yaxes(range=[0, 7])
-            elif kind == "Warehouse shortfall":
-                need = g.groupby("dcat").need.sum()
-                whc = pd.Series(pl.wh_start).groupby(pl.it.disp_cat).sum()
-                d = pd.DataFrame({"Stores need": need, "Warehouse has": whc}).fillna(0).reset_index(names="category") \
-                    .melt("category", var_name="", value_name="pieces")
-                fig = px.bar(d, x="category", y="pieces", color="", barmode="group", title="Stores need vs warehouse has",
-                             color_discrete_sequence=["#66142E", "#E04E1C"])
-            elif kind == "New launch":
-                stys = grp.sku.tolist()
-                s = sales[sales.sku_id.map(pl.it.style_id).isin(stys) & (sales.date > P["today"] - pd.Timedelta(days=70))]
-                d = s.groupby(pd.Grouper(key="date", freq="W-SAT")).qty.sum().reset_index()
-                fig = px.bar(d, x="date", y="qty", title=f"{', '.join(stys)}: weekly sales since launch",
-                             labels={"qty": "pieces sold", "date": ""}, color_discrete_sequence=["#E04E1C"])
-            elif kind == "Sold-out hit":
-                stys = grp.sku.tolist()
-                s = sales[sales.sku_id.map(pl.it.style_id).isin(stys) & (sales.date > P["today"] - pd.Timedelta(days=270))]
-                d = s.groupby([s.date.dt.to_period("M").dt.to_timestamp(), s.sku_id.map(pl.it.style_id)]).qty.sum().reset_index()
-                d.columns = ["month", "style", "pieces sold"]
-                fig = px.line(d, x="month", y="pieces sold", color="style", markers=True,
-                              title="Monthly sales: strong, then gone when the shelves emptied", labels={"month": ""},
-                              color_discrete_sequence=["#E04E1C", "#66142E", "#D4A017", "#511D00", "#A0522D", "#8C6E54", "#C9431A", "#E1CEAC"])
-            elif kind == "New store":
-                s = sales[sales.store_id.isin(grp.store)]
-                d = s.groupby(pd.Grouper(key="date", freq="W-SAT")).qty.sum().reset_index()
-                fig = px.bar(d, x="date", y="qty", title="Weekly sales since opening", labels={"qty": "pieces", "date": ""})
-            if fig is not None:
-                plot(fig, 300)
+            st.markdown(f"**{sev.get(grp.severity.iloc[0], '')} {kind}** · {len(grp)} found" +
+                        (f" · {M(grp.value.sum())}" if grp.value.sum() > 0 else ""))
+            st.markdown(f"**What we did:** {grp.action.iloc[0]}")
             with st.expander("Details"):
-                st.dataframe(grp[["store", "sku", "detail", "action"]], hide_index=True, use_container_width=True)
-    with st.container(border=True):
-        st.markdown("**🟠 Old stock sitting on shelves**")
-        st.markdown(f"**Why it matters:** fashion loses value the longer it sits.  \n**What we did:** "
-                    f"{int(mv[mv.type == sm.T_AGE].qty.sum())} pieces go where they sell, "
-                    f"{int(mv[mv.type == sm.T_PULL].qty.sum())} come back to the warehouse.")
-        sn = g[g.oh > 0].copy()
-        sn["band"] = pd.cut(sn.age, [-1, 30, 90, R["cfg"]["age_days"], 365, 10_000],
-                            labels=["<1 mo", "1–3 mo", f"3 mo–{R['cfg']['age_days']}d", f"{R['cfg']['age_days']}d–1 yr", ">1 yr"])
+                st.dataframe(grp[["store", "sku", "detail", "action"]], hide_index=True, width="stretch")
+    sn = g[g.oh > 0].copy()
+    if sn.age.notna().any():
+        a = cfg["ageing"]["age_days"]
+        sn["band"] = pd.cut(sn.age, [-1, 30, 90, a, 365, 100000], labels=["<1 mo", "1–3 mo", f"3 mo–{a}d", f"{a}d–1 yr", ">1 yr"])
         d = sn.groupby("band", observed=False).oh.sum().reset_index()
         plot(px.bar(d, x="band", y="oh", title="How long stock has been in stores", labels={"oh": "pieces", "band": ""},
-                    color_discrete_sequence=["#A0522D"]), 280, legend=False)
+                    color_discrete_sequence=["#8e44ad"]), 260, False)
 
-# ---- Stores
-with T[3]:
-    s = st.selectbox("Store", stores.index, format_func=lambda x: f"{x} · {stores.city[x]} · tier {stores.tier[x]}")
+with T[4]:
+    allowed = [s for s in stores.index if not SCOPE or s in SCOPE]
+    s = st.selectbox("Store", allowed, format_func=lambda x: f"{x} · {stores.city[x]} · {stores.tier[x]}")
     S = ins.store_summary(R).loc[s]
     kpi_cards([("Pieces now", f"{S.pieces_now:,}", "on shelf + on the way"), ("Coming in", f"{S.coming_in:,}", ""),
-               ("Going out", f"{S.going_out:,}", ""), ("Shelves used after", f"{S.fill_after:.0%}", f"of {S.capacity:,}")])
+               ("Going out", f"{S.going_out:,}", ""), ("Shelves used after", f"{S.fill_after:.0%}" if S.fill_after == S.fill_after else "—", "")])
     for r in ex[ex.store == s].itertuples():
-        st.warning(f"**{ISSUE_PLAIN.get(r.issue, (r.issue,))[0]}:** {r.detail}. → {r.action}")
+        st.warning(f"**{r.issue}:** {r.detail} → {r.action}")
     gs = g.loc[s]
-    inn, out = mv[mv.to_id == s], mv[mv.from_id == s]
-    cat = gs.groupby("dcat").agg(now=("pos", "sum"))
-    cat["after"] = cat.now + inn.groupby(inn.sku_id.map(pl.it.disp_cat)).qty.sum().reindex(cat.index).fillna(0) \
-        - out.groupby(out.sku_id.map(pl.it.disp_cat)).qty.sum().reindex(cat.index).fillna(0)
-    cat["minimum"] = [P["md"].get((stores.tier[s], c_), 0) for c_ in cat.index]
-    d = cat.reset_index(names="category").melt("category", ["now", "after"], var_name="", value_name="pieces")
-    fig = px.bar(d, x="category", y="pieces", color="", barmode="group", title="Stock by category vs minimum display",
-                 color_discrete_sequence=["#E1CEAC", "#E04E1C"])
-    fig.add_scatter(x=cat.index, y=cat.minimum, mode="markers", name="minimum",
-                    marker=dict(symbol="line-ew", size=26, line=dict(width=3, color="#66142E")))
-    plot(fig, 320)
+    opt = gs.groupby("option").agg(sizes=("pos", lambda x: int((x > 0).sum())), of=("size", "count"), sells=("fd30", "sum"))
+    core_miss = gs[gs.is_core & (gs.pos <= 0)].groupby("option").size()
+    opt["missing core"] = core_miss.reindex(opt.index).fillna(0).astype(int)
+    brk = opt[(opt.sizes >= 2) & (opt["missing core"] > 0)].sort_values("sells", ascending=False)
+    st.markdown(f"**Size sets:** {len(brk)} selling options are missing a core size before the plan.")
+    if len(brk):
+        st.dataframe(brk.round(2).rename(columns={"sizes": "sizes in stock", "of": "sizes made", "sells": "pieces/day"}), width="stretch", height=220)
     cov = (gs.pos / gs.fd30).where(gs.fd30 > 0.01)
     band = pd.cut(cov, [-1, 7, 14, 30, 60, 1e9], labels=["<1 wk", "1–2 wk", "2–4 wk", "1–2 mo", "2+ mo"])
     d = band.value_counts().reindex(band.cat.categories).reset_index()
     d.columns = ["lasts", "sizes"]
-    plot(px.bar(d, x="lasts", y="sizes", color="lasts", title="How long each size's stock lasts (before plan)",
-                color_discrete_sequence=["#66142E", "#A0522D", "#D4A017", "#E04E1C", "#8C6E54"]), 280, legend=False)
-    for title, df in (("⬇️ Coming in", inn), ("⬆️ Going out", out)):
-        with st.expander(f"{title} · {len(df)} lines, {int(df.qty.sum())} pieces"):
-            st.dataframe(df[["priority", "kind", "from_id", "to_id", "style_name", "size", "qty", "reason"]],
-                         hide_index=True, use_container_width=True)
+    plot(px.bar(d, x="lasts", y="sizes", title="How long each size's stock lasts (before plan)", color_discrete_sequence=["#2F5D62"]), 260, False)
+    for title, df in (("⬇️ Coming in", tr[tr.to_id == s]), ("⬆️ Going out", tr[tr.from_id == s])):
+        with st.expander(f"{title} · {len(df)} trips"):
+            st.dataframe(df[["to_number", "from_id", "to_id", "pieces", "reason"]], hide_index=True, width="stretch")
 
-# ---- Approve
-with T[4]:
-    pack = sm.approval_pack(mv, stores)
-    st.markdown(f"#### The ten-minute approval\n**{len(pack)} decisions** cover all **{len(mv):,} moves**. "
-                "Everything starts approved: untick what you don't want, then download the approved list.")
-    approved_ids = set()
-    step_help = {"1 · Urgent refills": "Stores that will run out before a normal delivery. One decision per store.",
-                 "2 · Sign-off: over ₹1 lakh": "Each move worth over ₹1 lakh at MRP needs a person's sign-off.",
-                 "3 · Routine": "Everything else, one decision per kind of move."}
-    for step, grp in pack.groupby("step", sort=True):
-        st.markdown(f"**Step {step}** · {len(grp)} decisions · {int(grp.pieces.sum()):,} pieces · {inr(grp.value_mrp.sum())}  \n"
-                    f"<small>{step_help.get(step, '')}</small>", unsafe_allow_html=True)
-        view = grp.assign(ok=True, value=grp.value_mrp.map(inr))[["ok", "decision", "pieces", "value", "lines", "detail", "move_ids"]]
-        ed = st.data_editor(view, hide_index=True, use_container_width=True, key=f"pack_{step}",
-                            disabled=["decision", "pieces", "value", "lines", "detail"],
-                            height=min(420, 38 + 35 * len(view)),
-                            column_config={"move_ids": None, "ok": st.column_config.CheckboxColumn("✓", width="small"),
-                                           "lines": st.column_config.NumberColumn("lines", width="small"),
-                                           "detail": st.column_config.TextColumn("why", width="large")})
-        for ids in ed[ed.ok].move_ids:
-            approved_ids.update(ids.split(","))
-    approved = mv[mv.move_id.isin(approved_ids)]
-    st.success(f"Approved {len(approved):,} of {len(mv):,} moves · {int(approved.qty.sum()):,} pieces · {inr(approved.value_mrp.sum())}")
-    cols = ["move_id", "priority", "approval", "type", "from_id", "to_id", "style_name", "size", "sku_id", "qty", "value_mrp",
-            "dispatch", "arrives", "reason"]
-    csv = approved[cols].assign(dispatch=approved.dispatch.dt.strftime("%Y-%m-%d"),
-                                arrives=approved.arrives.dt.strftime("%Y-%m-%d")).to_csv(index=False).encode()
-    st.download_button("⬇️ Download approved moves (CSV)", csv, file_name=f"approved_moves_{pl.run:%Y-%m-%d}.csv", type="primary")
-    with st.expander("Every line with its reason"):
-        st.dataframe(mv[["priority", "kind", "from_id", "to_id", "style_name", "size", "qty", "value_mrp", "reason"]],
-                     hide_index=True, use_container_width=True, height=460)
-    with st.expander("Prefer to approve trip by trip?"):
-        routes = (mv.groupby(["type", "from_id", "to_id"])
-                  .agg(pieces=("qty", "sum"), value=("value_mrp", "sum"), urgent=("priority", lambda x: int((x == "High").sum())),
-                       big=("approval", lambda x: (x != "").any())).reset_index().sort_values(["urgent", "value"], ascending=False))
-        routes.insert(0, "ok", True)
-        routes["trip"] = routes.big.map({True: "💰 ", False: ""}) + routes.from_id + " → " + routes.to_id
-        routes["kind"] = routes.type.map(lambda t: TYPE_PLAIN[t][0])
-        routes["value"] = routes.value.map(inr)
-        ed = st.data_editor(routes[["ok", "trip", "pieces", "value", "urgent", "kind", "type", "from_id", "to_id"]], hide_index=True,
-                            use_container_width=True, height=420, disabled=["trip", "pieces", "value", "urgent", "kind"], key="trips",
-                            column_config={"type": None, "from_id": None, "to_id": None, "ok": st.column_config.CheckboxColumn("✓", width="small"),
-                                           "urgent": st.column_config.NumberColumn("urgent", width="small")})
-        trip_ok = mv.merge(ed[ed.ok][["type", "from_id", "to_id"]], on=["type", "from_id", "to_id"])
-        st.caption(f"Approved {int(ed.ok.sum())} of {len(ed)} trips · {int(trip_ok.qty.sum()):,} pieces · {inr(trip_ok.value_mrp.sum())}")
-        st.download_button("⬇️ Download trip-approved moves (CSV)",
-                           trip_ok[cols].assign(dispatch=trip_ok.dispatch.dt.strftime("%Y-%m-%d"),
-                                                arrives=trip_ok.arrives.dt.strftime("%Y-%m-%d")).to_csv(index=False).encode(),
-                           file_name=f"approved_moves_by_trip_{pl.run:%Y-%m-%d}.csv", key="dl_trips")
-
-# ---- Ask (chatbot)
 with T[5]:
+    if not auth.can(ROLE, "approver"):
+        st.info("Your role can view the plan but not approve it. Ask an approver.")
+    pack = E.approval_pack(tr, cfg)
+    st.markdown(f"#### The ten-minute approval\n**{len(pack)} decisions** cover all **{len(tr)} trips** ({len(mv):,} lines). "
+                "Everything starts approved: untick what you don't want.")
+    ok_to = set()
+    for step, grp in pack.groupby("step", sort=True):
+        st.markdown(f"**Step {step}** · {len(grp)} decisions · {int(grp.pieces.sum()):,} pieces · net {M(grp.net_benefit.sum())}")
+        view = grp.assign(ok=True, value=grp.value_mrp.map(M), net=grp.net_benefit.map(M))[["ok", "decision", "trips", "pieces", "value", "net", "detail", "to_numbers"]]
+        ed = st.data_editor(view, hide_index=True, width="stretch", key=f"pack_{step}", disabled=not auth.can(ROLE, "approver") or
+                            ["decision", "trips", "pieces", "value", "net", "detail"], height=min(420, 38 + 35 * len(view)),
+                            column_config={"to_numbers": None, "ok": st.column_config.CheckboxColumn("✓", width="small"),
+                                           "detail": st.column_config.TextColumn("why", width="large")})
+        for ids in ed[ed.ok].to_numbers:
+            ok_to.update(ids.split(","))
+    orders = R["orders"]
+    orders = orders[orders.to_number.isin(ok_to) & orders.to_number.isin(tr.to_number)]
+    st.success(f"Approved {orders.to_number.nunique()} of {len(tr)} trips · {int(orders.qty.sum()):,} pieces")
+    if auth.can(ROLE, "approver"):
+        a, b = st.columns(2)
+        a.download_button("⬇️ Transfer orders for your ERP / WMS (CSV)", orders.to_csv(index=False).encode(),
+                          f"transfer_orders_{pl.run:%Y-%m-%d}.csv", type="primary", width="stretch")
+        if b.button("📤 Release to warehouse & track receipts", width="stretch", disabled=orders.empty):
+            fb.release_orders(orders, USER, st.session_state.run_id)
+            st.success(f"Released {orders.to_number.nunique()} transfer orders. Record receipts on the Track tab.")
+        st.caption("The CSV is a generic transfer-order format (one TO per trip: to_number, line_no, from_location, to_location, sku_id, qty, "
+                   "ship_date, expected_receipt). Most ERPs and WMSs import it directly or with a column mapping.")
+
+with T[6]:
+    st.markdown("#### Did the stock arrive?")
+    st.caption("Released transfer orders are tracked here. Upload what stores actually received (to_number, sku_id, qty_received).")
+    if auth.can(ROLE, "approver"):
+        rc = st.file_uploader("Receipts file (CSV)", type=["csv"], key="rcpt")
+        if rc is not None and st.button("Record receipts"):
+            try:
+                fb.add_receipts(pd.read_csv(rc, dtype=str), USER)
+                st.success("Receipts recorded.")
+            except ValueError as e:
+                st.error(str(e))
+    rec = fb.reconciliation()
+    if rec.empty:
+        st.info("No transfer orders released yet.")
+    else:
+        s_ = rec.groupby("status").agg(lines=("sku_id", "size"), pieces=("shipped", "sum")).reset_index()
+        kpi_cards([(r.status, f"{int(r.lines)}", f"{int(r.pieces)} pieces") for r in s_.itertuples()])
+        st.dataframe(rec, hide_index=True, width="stretch", height=380)
+        st.download_button("⬇️ Receipt variance (CSV)", rec.to_csv(index=False).encode(), "receipt_variance.csv")
+
+with T[7]:
     key = st.session_state.get("api_key")
-    ai = chat.claude_available(key)
-    st.markdown(f"Ask anything about **this plan**. {'🤖 Answers by Claude AI.' if ai else '⚡ Quick answers mode.'} "
-                "Questions outside the report get a polite apology.")
-    if not ai:
-        with st.expander("Turn on Claude AI for smarter answers"):
-            k = st.text_input("Anthropic API key", type="password", help="Kept only for this browser session; never saved.")
-            if st.button("Use this key") and k:
-                st.session_state.api_key = k.strip()
+    ai = chat.claude_available(key) and st.session_state.get("ai_ok", False)
+    st.markdown(f"Ask about **this plan**. {'🤖 AI answers on.' if ai else '⚡ Quick answers (nothing leaves this server).'}")
+    if auth.can(ROLE, "admin") and not ai:
+        with st.expander("Turn on AI answers"):
+            st.caption("Sends the plan report (trips, moves, issues, stock figures; never customer or staff data) to the AI provider. "
+                       "Check this is covered by your data-processing agreement first.")
+            k = st.text_input("Anthropic API key (blank = use server key)", type="password")
+            if st.checkbox("I confirm sending the plan report to the AI provider is allowed") and st.button("Turn on"):
+                if k:
+                    st.session_state.api_key = k.strip()
+                st.session_state.ai_ok = True
                 st.rerun()
     st.session_state.setdefault("chat", [])
-    cols = st.columns(2)
-    picked = None
-    for i, q in enumerate(EXAMPLES):
-        if cols[i % 2].button(q, key=f"ex{i}", use_container_width=True):
-            picked = q
     for m in st.session_state.chat:
-        with st.chat_message(m["role"], avatar="🧑" if m["role"] == "user" else "📦"):
+        with st.chat_message(m["role"]):
             st.markdown(m["content"])
-    q = st.chat_input("Ask about stores, items, moves, problems…") or picked
+    q = st.chat_input("Ask about stores, trips, money, problems…")
     if q:
-        with st.chat_message("user", avatar="🧑"):
+        with st.chat_message("user"):
             st.markdown(q)
-        with st.chat_message("assistant", avatar="📦"):
-            with st.spinner("Looking through the report…"):
-                a = (chat.ask_claude(q, st.session_state.chat, st.session_state.ctx, key) if ai else chat.quick_answer(q, R))
+        with st.chat_message("assistant"):
+            if ai:
+                st.session_state.setdefault("ctx", chat.build_context(R))
+                a = chat.ask_claude(q, st.session_state.chat, st.session_state.ctx, cfg["brand"]["name"], key)
+            else:
+                a = chat.quick_answer(q, R)
             st.markdown(a)
         st.session_state.chat += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
-    if st.session_state.chat and st.button("Clear chat"):
-        st.session_state.chat = []
-        st.rerun()
 
-# ---- Feedback
-with T[6]:
-    runs = fb.runs()
-    r = fb.ratings()
-    st.markdown("#### Rate a plan")
-    st.caption("Tell us how a plan worked out once the stock arrived. Your ratings tune the settings for future plans.")
+with T[8]:
+    runs, r = fb.runs(), fb.ratings()
     with st.form("rate", clear_on_submit=True):
-        opts = runs.run_id.tolist()[::-1] if not runs.empty else [st.session_state.run_id]
-        lab = {x: x for x in opts}
-        if not runs.empty:
-            lab = {row.run_id: f"{row.plan_date} · {row.moves} moves · {row.data[:30]} (run {row.run_at})" for row in runs.itertuples()}
-        run_id = st.selectbox("Which plan?", opts, format_func=lambda x: lab.get(x, x))
-        st.markdown("Overall")
+        st.markdown("#### Rate this plan once the stock has landed")
         stars = st.feedback("stars")
         c1, c2, c3 = st.columns(3)
         right = c1.select_slider("Were the moves right?", [1, 2, 3, 4, 5], 4)
         easy = c2.select_slider("Easy to understand?", [1, 2, 3, 4, 5], 4)
         time_ = c3.select_slider("Saved you time?", [1, 2, 3, 4, 5], 4)
         changes = st.multiselect("What should change next time?", list(fb.SUGGESTIONS))
-        comment = st.text_area("Anything else? (what went well, what went wrong)")
-        name = st.text_input("Your name or role (optional)")
+        comment = st.text_area("Anything else?")
         if st.form_submit_button("Send feedback", type="primary"):
             if stars is None:
                 st.warning("Please pick a star rating.")
             else:
-                fb.add_rating(run_id, stars + 1, right, easy, time_, changes, comment, name)
-                st.success("Thank you! Your feedback is saved.")
-                st.rerun()
-    st.markdown("#### How the app has been doing")
-    if r.empty:
-        st.info("No ratings yet. Be the first!")
-    else:
-        kpi_cards([("Average rating", f"{r.stars.mean():.1f} ★", f"{len(r)} reviews"),
-                   ("Moves right", f"{r.moves_right.mean():.1f}/5", ""), ("Easy to understand", f"{r.easy.mean():.1f}/5", ""),
-                   ("Saves time", f"{r.saves_time.mean():.1f}/5", "")])
-        rr = r.merge(runs[["run_id", "plan_date"]], on="run_id", how="left") if not runs.empty else r.assign(plan_date=r.run_id)
-        trend = rr.groupby("plan_date")[["stars", "moves_right", "easy", "saves_time"]].mean().reset_index() \
-            .melt("plan_date", var_name="measure", value_name="score")
-        plot(px.line(trend, x="plan_date", y="score", color="measure", markers=True, title="Ratings by plan date", range_y=[0, 5.2]), 300)
-        ch = pd.Series([c.strip() for cell in r.changes.fillna("") for c in str(cell).split(";") if c.strip()])
-        if len(ch):
-            d = ch.value_counts().reset_index()
-            d.columns = ["request", "votes"]
-            plot(px.bar(d, x="votes", y="request", orientation="h", title="Most requested changes",
-                        color_discrete_sequence=["#8C6E54"]), 80 + 34 * len(d), legend=False)
-        notes = r[r.comment.fillna("") != ""].tail(8)[::-1]
-        for n in notes.itertuples():
-            st.markdown(f"> {'★' * int(n.stars)} {n.comment}  \n> <small>{n.name or 'anonymous'} · {n.rated_at}</small>",
-                        unsafe_allow_html=True)
-    st.markdown("#### Suggested settings for future plans")
-    cur = fb.load_settings()
-    sug = fb.suggested_settings(cur)
-    if sug.empty:
-        st.caption("Suggestions appear here once people ask for changes in their ratings.")
-    else:
-        st.dataframe(sug.drop(columns="setting"), hide_index=True, use_container_width=True)
-        a, b = st.columns(2)
-        if a.button("✅ Use suggested settings from the next run", type="primary", use_container_width=True):
-            new = dict(cur) | {row.setting: int(row.suggested) for row in sug.itertuples()}
-            fb.save_settings(new)
-            st.success("Saved. The next run will use these settings (you can still change them under Settings).")
-        if b.button("↩️ Reset to standard settings", use_container_width=True):
+                fb.add_rating(st.session_state.run_id, stars + 1, right, easy, time_, changes, comment, USER)
+                st.success("Thank you!")
+    if not r.empty:
+        kpi_cards([("Average rating", f"{r.stars.mean():.1f} ★", f"{len(r)} reviews"), ("Moves right", f"{r.moves_right.mean():.1f}/5", ""),
+                   ("Easy", f"{r.easy.mean():.1f}/5", ""), ("Saves time", f"{r.saves_time.mean():.1f}/5", "")])
+    sug = fb.suggested_settings(cfg)
+    if len(sug):
+        st.markdown("#### Suggested settings from feedback")
+        st.dataframe(sug.drop(columns="setting"), hide_index=True, width="stretch")
+        if auth.can(ROLE, "admin") and st.button("✅ Use these from the next run", type="primary"):
+            over = fb.load_settings()
+            for row in sug.itertuples():
+                sec, k = row.setting.split(".")
+                over.setdefault(sec, {})[k] = int(row.suggested)
+            fb.save_settings(over)
+            st.success("Saved.")
+        if auth.can(ROLE, "admin") and st.button("↩️ Reset to standard settings"):
             fb.reset_settings()
-            st.success("Back to standard settings.")
     if not runs.empty:
-        with st.expander(f"Run history ({len(runs)} runs)"):
-            st.dataframe(runs.drop(columns="settings")[::-1], hide_index=True, use_container_width=True)
+        with st.expander(f"Run history ({len(runs)})"):
+            st.dataframe(runs[::-1], hide_index=True, width="stretch")
 
-# ---- Method
-with T[7]:
-    st.markdown("#### How StockFlow AI decides")
-    st.graphviz_chart("""
-digraph{rankdir=TB;bgcolor=transparent;node[shape=box style="rounded,filled" fontname=Helvetica fillcolor="#fdf6ea"];
-data[label="Your data: sales · stock · deliveries · calendar · rules" fillcolor="#f3ebe0"];
-clean[label="1. Check & clean: fix bad records, spot problems"];
-speed[label="2. Selling speed = sales ÷ days on shelf"];
-season[label="3. Season: weddings & festivals lift demand"];
-need[label="4. Who needs what: stock + on the way vs demand"];
-plan[label="5. Plan: warehouse→store · store→store · old stock · back to WH" fillcolor="#fbeedd"];
-check[label="6. Re-check every rule" fillcolor="#fff3cd"];
-out[label="Ready-to-approve list + problems explained" fillcolor="#E04E1C" fontcolor=white];
-data->clean->speed->need; season->need; need->plan->check->out;}""", use_container_width=True)
+with T[9]:
+    data_guide()
+
+with T[10]:
+    st.markdown("#### How StockFlow decides")
+    st.graphviz_chart("""digraph{rankdir=TB;bgcolor=transparent;node[shape=box style="rounded,filled" fontname=Helvetica fillcolor="#eef3f3"];
+data[label="Your sheets: sales · stock · deliveries · lanes · calendar"];clean[label="1. Check & clean (personal data dropped)"];
+speed[label="2. Selling speed = sales ÷ days on the shelf"];season[label="3. Season: your peak days & events"];
+need[label="4. Need: stock + on the way vs demand, size sets, season end"];plan[label="5. Plan: warehouse→store · store→store · old stock by option · capped returns · outlet"];
+money[label="6. Value every line: margin, markdown, holding vs freight & handling"];batch[label="7. Group into trips; drop what doesn't pay"];
+check[label="8. Re-check every rule" fillcolor="#fff3cd"];out[label="Trips to approve + transfer orders" fillcolor="#2F5D62" fontcolor=white];
+data->clean->speed->need;season->need;need->plan->money->batch->check->out;}""", width="stretch")
     st.markdown("""
-- **Selling speed (velocity):** pieces of a size a store sells per day, counting **only days it was on the shelf**. 4 sold in 10 days in stock = 0.4/day, even if it was missing for weeks. That's how hidden stockouts are caught.
-- **Cover:** how many days stock will last = stock ÷ selling speed. 10 pieces at 0.5/day = 20 days.
-- **Lead time:** days for a delivery to arrive. Warehouse to store takes 3–6 days by zone; store to store takes 2–7.
-- **Short on stock?** Pieces are handed out one at a time to whichever store would run out first.
-- **Feedback loop:** ratings and requested changes on the Feedback tab suggest new settings; once accepted, the next run uses them.
+- **Option** = one style in one colour (and fit). Size sets are kept per option.
+- **Core sizes** = the fewest sizes making up ~70% of a category's sales (or set them in size_sets.csv). An option on display with a core size missing gets that size first; a giving store never hands over its last core size.
+- **Broken runs** of old stock (a few odd sizes) are moved together to one store that sells the option and lacks those sizes, or returned together.
+- **Returns are capped** per store per run, so a store is never stripped in one day; the rest is queued.
+- **Season end**: nothing is refilled to land after it; leftover goes to an outlet if you have one, else the warehouse.
+- **Money**: every line is valued; lines and trips that cost more to move than they earn are left out (rule-driven display top-ups stay).
 """)
-    st.markdown("#### Business rules · re-checked on every plan")
     allp = (val.status == "PASS").all()
     (st.success if allp else st.error)("All rules passed." if allp else "Some rules failed. Don't send this plan.")
     for r_ in val.itertuples():
-        st.markdown(f"{'✅' if r_.status == 'PASS' else '❌'} {RULE_PLAIN.get(r_.rule, r_.rule)} "
-                    f"<small>(checked {r_.checked})</small>", unsafe_allow_html=True)
-    lift = pd.DataFrame(pl.season.lift).T.reset_index(names="state").melt("state", var_name="day", value_name="vs normal")
-    plot(px.bar(lift, x="day", y="vs normal", color="state", barmode="group", title="Sales on special days (1.0 = normal day)")
-         .add_hline(y=1, line_dash="dot"), 300)
+        st.markdown(f"{'✅' if r_.status == 'PASS' else '❌'} {r_.rule} <small>(checked {r_.checked})</small>", unsafe_allow_html=True)
+    if pl.season.on and pl.season.lift:
+        lift = pd.DataFrame(pl.season.lift).T.reset_index(names="region").melt("region", var_name="day", value_name="vs normal")
+        plot(px.bar(lift, x="day", y="vs normal", color="region", barmode="group", title="Sales on special days (1.0 = normal)").add_hline(y=1, line_dash="dot"), 300)
